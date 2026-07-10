@@ -1,0 +1,7 @@
+{
+	"ver": 1,
+	"name": "Global-ish Quick Capture",
+	"icon": "ti-bolt",
+	"version": "0.9.0",
+	"description": "A floating capture box that IS the real Thymer editor. Pop it with a shortcut, jot anything, and send it to your Journal, any page (top, bottom or under a heading) or any line. Summon it from any app with a global OS hotkey."
+}

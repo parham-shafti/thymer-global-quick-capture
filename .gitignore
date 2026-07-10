@@ -1,0 +1,10 @@
+.DS_Store
+
+# internal working notes and dev tooling, not for the public repo
+HANDOVER.md
+dev-cdp.mjs
+feature-request-jd.md
+
+# raw screen recordings are attached to the GitHub release, not committed
+# (the README embeds the optimised GIFs instead)
+Assets/*.mp4
