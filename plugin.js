@@ -876,7 +876,7 @@ class Plugin extends AppPlugin {
 		const pop = document.createElement('div');
 		pop.className = 'qc-pop';
 		pop.innerHTML = `
-			<input class="qc-pop-input" type="text" placeholder='Search pages & lines… ("+" matches words anywhere)' />
+			<input class="qc-pop-input" type="text" placeholder='Search pages, lines, or a date for the Journal (e.g. "tomorrow")…' />
 			<div class="qc-pop-list"></div>
 		`;
 		this.footerEl.appendChild(pop);
@@ -1016,7 +1016,29 @@ class Plugin extends AppPlugin {
 		journal.className = 'qc-opt';
 		journal.innerHTML = `<span class="ti ti-calendar-event"></span><span class="qc-opt-text">Today's Journal</span><span class="qc-opt-sub">default</span>`;
 		this.addDestOpt(list, journal, () => { this.setDest({ kind: 'journal' }); this.closeDestPicker(); });
-		this.sec(list, 'Type to search pages & lines');
+		this.sec(list, 'Type to search pages, lines, or a date');
+	}
+
+	// Parse a typed query as a journal date ("tomorrow", "next friday",
+	// "2026-07-20", "yesterday", ...). Returns { dt, label } or null, where dt is
+	// a `{toDate()}` shim (getJournalRecord only calls .toDate()), so this works
+	// whether or not Thymer's rich DateTime parser is reachable from a plugin.
+	parseJournalDate(q) {
+		const s = String(q || '').trim();
+		if (!s) return null;
+		let d = null;
+		try {
+			const DT = (typeof DateTime !== 'undefined') ? DateTime : (typeof globalThis !== 'undefined' ? globalThis.DateTime : null);
+			if (DT && DT.parseDateTimeString) {
+				const dt = DT.parseDateTimeString(s);
+				if (dt && typeof dt.toDate === 'function') { const jd = dt.toDate(); if (jd && !isNaN(jd.getTime())) d = jd; }
+			}
+		} catch (e) {}
+		if (!d) d = fallbackJournalDate(s);
+		if (!d) return null;
+		const label = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).replace(',', '');
+		const jd = d;
+		return { dt: { toDate: () => jd }, label };
 	}
 
 	// Search pages by NAME (over the full record set, like the native @ picker —
@@ -1029,6 +1051,7 @@ class Plugin extends AppPlugin {
 		const my = ++this.searchToken;
 		const parts = q.split('+').map((p) => qcNorm(p)).filter(Boolean);
 		if (!parts.length) { this.renderDefaultDestOptions(list); return; }
+		const jdate = this.parseJournalDate(q);   // a "Journal · <date>" row when the query reads as a date
 		const terms = new Set();
 		for (const p of parts) {
 			terms.add(p);
@@ -1089,7 +1112,7 @@ class Plugin extends AppPlugin {
 				return r ? { guid: it.rguid, name: r.getName && r.getName(), collGuid: this.collGuidOf(r) } : null;
 			});
 		}
-		this.renderDestResults(list, pages, lines, parts, true);
+		this.renderDestResults(list, pages, lines, parts, true, jdate);
 		// 2) workspace-wide search: extra LINE matches beyond what's loaded, plus
 		//    a safety net for any title match the record snapshot might have
 		//    missed. Merged in when it arrives (token-guarded).
@@ -1113,15 +1136,24 @@ class Plugin extends AppPlugin {
 		}
 		if (my !== this.searchToken) return;
 		sortPages();
-		this.renderDestResults(list, pages, lines, parts, false);
+		this.renderDestResults(list, pages, lines, parts, false, jdate);
 	}
 
-	renderDestResults(list, pages, lines, parts, searching) {
+	renderDestResults(list, pages, lines, parts, searching, jdate) {
 		this.resetDestList(list);
+		if (jdate) {
+			this.sec(list, 'Journal');
+			const j = document.createElement('div');
+			j.className = 'qc-opt';
+			j.innerHTML = `<span class="ti ti-calendar-event"></span><span class="qc-opt-text">Journal · ${esc(jdate.label)}</span>`;
+			this.addDestOpt(list, j, () => { this.setDest({ kind: 'journal', date: jdate.dt, dateLabel: jdate.label }); this.closeDestPicker(); });
+		}
 		if (!pages.length && !lines.length) {
-			const e = document.createElement('div'); e.className = 'qc-opt';
-			e.textContent = searching ? 'Searching…' : 'No pages or lines found';
-			list.appendChild(e);
+			if (!jdate) {
+				const e = document.createElement('div'); e.className = 'qc-opt';
+				e.textContent = searching ? 'Searching…' : 'No pages or lines found';
+				list.appendChild(e);
+			}
 			return;
 		}
 		if (pages.length) {
@@ -1201,7 +1233,7 @@ class Plugin extends AppPlugin {
 		const lbl = this.footerEl && this.footerEl.querySelector('.qc-dest-lbl');
 		const icon = this.footerEl && this.footerEl.querySelector('.qc-dest .ti');
 		if (!lbl) return;
-		if (dest.kind === 'journal') { lbl.textContent = "Today's Journal"; if (icon) icon.className = 'ti ti-calendar-event'; }
+		if (dest.kind === 'journal') { lbl.textContent = dest.dateLabel ? ('Journal · ' + dest.dateLabel) : "Today's Journal"; if (icon) icon.className = 'ti ti-calendar-event'; }
 		else if (dest.kind === 'line') {
 			lbl.textContent = dest.name;
 			lbl.title = dest.pageName ? `${dest.pageName} › ${dest.name}` : dest.name;
@@ -1231,7 +1263,7 @@ class Plugin extends AppPlugin {
 
 	// ---- send --------------------------------------------------------------
 
-	async resolveJournalRecord() {
+	async resolveJournalRecord(dt) {
 		const cols = await this.data.getAllCollections();
 		const wsGuid = this.ui.getActivePanel()?.getNavigation()?.workspaceGuid
 			|| (typeof window !== 'undefined' && window.g_universe && window.g_universe.workspaceGuid) || null;
@@ -1244,7 +1276,8 @@ class Plugin extends AppPlugin {
 					// USER guid (the journal is per-user); date omitted = today.
 					// Passing the collection guid here creates a PARALLEL/duplicate
 					// journal page, so it must be the user guid.
-					return await c.getJournalRecord({ workspaceGuid: wsGuid, guid: userGuid });
+						// dt (a DateTime) omitted = today; otherwise that date's journal
+						return await c.getJournalRecord({ workspaceGuid: wsGuid, guid: userGuid }, dt);
 				}
 			} catch (e) {}
 		}
@@ -1281,9 +1314,9 @@ class Plugin extends AppPlugin {
 		const indent = !!this.indentUnder;
 		try {
 			if (this.dest.kind === 'journal') {
-				destRec = await this.resolveJournalRecord();
+				destRec = await this.resolveJournalRecord(this.dest.date);
 				if (!destRec) { this.toast('No Journal found in this workspace — pick a page instead.'); return; }
-				destLabel = "today's Journal";
+				destLabel = this.dest.dateLabel ? ('the Journal, ' + this.dest.dateLabel) : "today's Journal";
 				parentTarget = destRec;
 				anchor = await lastTopLevel(destRec);
 			} else if (this.dest.kind === 'line') {
@@ -1410,6 +1443,18 @@ async function lastTopLevel(rec) {
 function truncate(s, n) { s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
 function qcNorm(s) { return String(s == null ? '' : s).toLowerCase().replace(/\s+/g, ' ').trim(); }
 function qcIsMac() { try { return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || ''); } catch (e) { return true; } }
+// Minimal date fallback (used only if Thymer's DateTime parser is unreachable):
+// ISO YYYY-MM-DD, plus today / tomorrow / yesterday. Returns a JS Date or null.
+function fallbackJournalDate(s) {
+	const t = s.toLowerCase().trim();
+	const today = new Date(); today.setHours(0, 0, 0, 0);
+	if (t === 'today') return today;
+	if (t === 'tomorrow') { const d = new Date(today); d.setDate(d.getDate() + 1); return d; }
+	if (t === 'yesterday') { const d = new Date(today); d.setDate(d.getDate() - 1); return d; }
+	const m = t.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+	if (m) { const d = new Date(+m[1], +m[2] - 1, +m[3]); d.setHours(0, 0, 0, 0); return isNaN(d.getTime()) ? null : d; }
+	return null;
+}
 // Escape + bold EVERY occurrence of the matched words in the full text (no
 // windowing — used by the line hover preview so the search terms stand out).
 function qcHighlightAll(text, parts) {

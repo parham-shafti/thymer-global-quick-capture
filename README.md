@@ -21,7 +21,7 @@ I am hoping we get to reach a full Global Capture once the wonderful Thymer Devs
 - **It is the real editor**, not a re-implementation. Indent/outdent, `@` references, dates, `#tags` and tasks all behave exactly as in Thymer.
 - **Floating, draggable and resizable.** Drag the header, resize from the corner. It remembers its size and position, adapts to your theme, and closes when you click outside.
 - **Send anywhere:**
-  - **Today's Journal** (the default, just hit send)
+  - **Today's Journal** (the default, just hit send), or type a date (`tomorrow`, `next friday`, `2026-07-20`) to send it to that day's Journal
   - **any page**, at the **Top**, at the **Bottom**, or under a **heading** you pick
   - **any individual line** in the workspace
 - **A destination picker that matches Thymer's own.** Searches page titles and line content, shows each result's collection icon, highlights the matched words, and previews a long line's full text on hover. Use `+` to require several words: `project+monday` matches items containing both.

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1
+
+- Capture to a specific day's Journal: type a date in the destination picker (`tomorrow`, `next friday`, `2026-07-20`, `yesterday`) and a "Journal · <date>" option appears. Past and future both work; Today's Journal stays the default.
+
 ## 0.9.0
 
 First public release.
