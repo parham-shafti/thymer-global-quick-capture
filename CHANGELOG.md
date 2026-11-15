@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.2 (deployed to Parham's workspace, not released)
+
+- The hidden Quick Capture collection stays out of the command palette: neither the scratch page nor the collection itself (Open Collection, New Page, "Create in Quick Capture") shows there any more.
+
 ## 0.9.1
 
 - Capture to a specific day's Journal: type a date in the destination picker (`tomorrow`, `next friday`, `2026-07-20`, `yesterday`) and a "Journal · <date>" option appears. Past and future both work; Today's Journal stays the default.

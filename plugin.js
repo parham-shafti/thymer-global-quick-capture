@@ -283,6 +283,15 @@ function qcPanelMode() {
 	return false;
 }
 
+// The code the scratch collection carries (see dataCode): plugin data, kept out of the command palette.
+const QC_DATA_CODE = '// Plugin-owned data. Kept out of the command palette, and never offered as a place to create a page.\n' +
+	'// The owning plugin\'s own createRecord still works: supportsCreateItem is true only inside that call.\n' +
+	'class Plugin extends CollectionPlugin {\n' +
+	'\tgetJumpToPaletteOptions() { return []; }\n' +
+	'\tsupportsCreateItem() { return this._dataCreate === true; }\n' +
+	'\tcreateNewRecord(...args) { this._dataCreate = true; try { return super.createNewRecord(...args); } finally { this._dataCreate = false; } }\n' +
+	'}\n';
+
 class Plugin extends AppPlugin {
 
 	/* All state as class fields so a stray onUnload() before onLoad() can't crash. */
@@ -650,23 +659,48 @@ class Plugin extends AppPlugin {
 			conf.name = 'Quick Capture';
 			conf.icon = conf.icon || 'ti-bolt';
 			conf.show_sidebar_items = false;
+			conf.show_cmdpal_items = false;  // nor in the command palette's search
 			conf.sidebar_display_mode = { mode: 'hidden_completely' };  // never in the sidebar
 			await nc.saveConfiguration(conf);
 		} catch (e) { /* keep default name if rename fails */ }
+		await this.dataCode(nc);
 		this.homeCollectionGuid = nc.getGuid ? nc.getGuid() : null;
 		return nc;
 	}
 
-	// Auto-hide the home collection from the sidebar (also migrates collections
-	// made by an older version that were visible). No-op once already hidden.
+	// Auto-hide the home collection from the sidebar and the command palette (also
+	// migrates collections made by an older version that were visible). Once per load.
 	async ensureHidden(col) {
+		if (this._hiddenChecked) return;
+		this._hiddenChecked = true;
 		try {
 			const conf = col.getConfiguration();
-			if (!conf || (conf.sidebar_display_mode && conf.sidebar_display_mode.mode === 'hidden_completely')) return;
-			conf.show_sidebar_items = false;
-			conf.sidebar_display_mode = { mode: 'hidden_completely' };
-			await col.saveConfiguration(conf);
+			if (conf && !(conf.sidebar_display_mode && conf.sidebar_display_mode.mode === 'hidden_completely' && conf.show_cmdpal_items === false)) {
+				conf.show_sidebar_items = false;
+				conf.show_cmdpal_items = false;
+				conf.sidebar_display_mode = { mode: 'hidden_completely' };
+				await col.saveConfiguration(conf);
+			}
 		} catch (e) {}
+		await this.dataCode(col);
+	}
+
+	// show_cmdpal_items keeps the scratch PAGE out of the command palette, but the
+	// collection itself was still listed there (Open Collection, New Page, "Create
+	// 'x' in Quick Capture"). Only the collection's own code drops that: no palette
+	// entries, and supportsCreateItem true only inside our own createRecord. Written
+	// only over Thymer's default stub, never over code someone wrote.
+	async dataCode(col) {
+		try {
+			const guid = col && col.getGuid ? col.getGuid() : null;
+			const api = guid ? this.data.getPluginByGuid(guid) : null;
+			if (!api || typeof api.saveCode !== 'function' || typeof api.getExistingCodeAndConfig !== 'function') return false;
+			const cur = String(((await Promise.resolve(api.getExistingCodeAndConfig())) || {}).code || '').trim();
+			if (cur === QC_DATA_CODE.trim()) return true;
+			if (cur && !/^class Plugin extends CollectionPlugin \{\s*onLoad\(\) \{\s*\/\/ Put your custom code here\.\.\.\s*\}\s*\}$/.test(cur)) return false;
+			await Promise.resolve(api.saveCode(QC_DATA_CODE));
+			return true;
+		} catch (e) { return false; }
 	}
 
 	// Persist to localStorage (NOT saveConfiguration — that reloads the plugin and
