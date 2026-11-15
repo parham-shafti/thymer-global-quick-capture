@@ -317,6 +317,7 @@ class Plugin extends AppPlugin {
 	collMap = {};                 // collection guid -> name (built on picker open)
 	recordsCache = [];            // all workspace records, snapshotted on picker open
 	newNoteMode = false;          // picker is asking for a new note's title + collection
+	newNoteFilter = null;         // repaints the collection list while step 1 is showing
 	linePreviewEl = null;         // floating full-text preview shown on line hover
 	panelMode = false;            // whole window = the capture box (#qc-panel in the URL)
 	panelWatchdog = null;         // panel mode: heals the box when Thymer re-renders panels
@@ -1161,7 +1162,7 @@ class Plugin extends AppPlugin {
 		this.loadCollMap();
 		this.renderDefaultDestOptions(list);
 		input.addEventListener('input', () => {
-			if (this.newNoteMode) return;   // the input is the note's title here, not a query
+			if (this.newNoteMode) { if (this.newNoteFilter) this.newNoteFilter(); return; }   // new note: filters the collections (step 1) or is the title (step 2)
 			clearTimeout(this.searchTimer);
 			const q = input.value.trim();
 			this.searchTimer = setTimeout(() => this.runDestSearch(q, list), 180);
@@ -1182,6 +1183,7 @@ class Plugin extends AppPlugin {
 
 	closeDestPicker() {
 		this.newNoteMode = false;
+		this.newNoteFilter = null;
 		clearTimeout(this.searchTimer);
 		this.searchToken++;   // invalidate in-flight searches
 		this.destOpts = []; this.destSel = 0;
@@ -1286,19 +1288,26 @@ class Plugin extends AppPlugin {
 	// New-note flow: type a title, pick a collection, and the capture becomes the
 	// body of a freshly created note there. Ported from the Move To plugin, where
 	// it came in as community PR #1 by phildrysdale1 — credit to him for the idea
-	// and the original implementation. Adapted to Quick Capture's two-step flow:
-	// choosing a collection sets the destination, and Send creates the note.
+	// and the original implementation. Adapted to Quick Capture's flow: picking
+	// sets the destination, and Send creates the note. Two steps like Whiteboard's
+	// (his ruling 2026-10-04: the old single field asked for a title while it
+	// looked like it searched the collections):
+	//   1. find and pick the collection, the field filters the list;
+	//   2. the title, prefilled with the capture's first line and selected, then
+	//      "Create page in <collection>" (Enter).
+	// Title left as prefilled = at Send the first line BECOMES the title and
+	// leaves the body (only a plain-text line without children).
 	async pickNewNote(list) {
 		const input = this.popEl && this.popEl.querySelector('.qc-pop-input');
 		if (!input) return;
 		clearTimeout(this.searchTimer);
 		const my = ++this.searchToken;
 		this.newNoteMode = true;
+		this.newNoteFilter = null;
 		input.value = '';
-		input.placeholder = 'Enter a title for the new note…';
+		input.placeholder = 'Find a collection';
 		this.resetDestList(list);
-		this.newNoteMode = true;   // resetDestList doesn't touch it, but keep intent explicit
-		this.sec(list, 'Loading collections…');
+		this.sec(list, 'Loading collections');
 		input.focus();
 
 		let collections = [];
@@ -1321,45 +1330,89 @@ class Plugin extends AppPlugin {
 			return an.localeCompare(bn);
 		});
 
+		const paint = () => {
+			const q = input.value.trim().toLowerCase();
+			this.resetDestList(list);
+			this.sec(list, 'New note');
+			const back = document.createElement('div');
+			back.className = 'qc-opt';
+			back.innerHTML = `<span class="ti ti-arrow-left"></span><span class="qc-opt-text">Back to destinations</span>`;
+			this.addDestOpt(list, back, () => {
+				this.newNoteMode = false;
+				this.newNoteFilter = null;
+				this.searchToken++;
+				input.value = '';
+				input.placeholder = 'Search pages, lines, or a date for the Journal (e.g. "tomorrow")…';
+				this.renderDefaultDestOptions(list);
+				input.focus();
+			});
+			const shown = collections.filter((c) => { try { return !q || (c.getName() || '').toLowerCase().includes(q); } catch (e) { return false; } });
+			this.sec(list, shown.length ? 'Choose a collection' : 'No collection matches');
+			for (const c of shown) {
+				let name = 'Collection', icon = '';
+				try { name = c.getName() || name; } catch (e) {}
+				try { icon = collIconFromConf(c.getConfiguration()); } catch (e) {}
+				icon = icon || 'ti-folder';
+				const opt = document.createElement('div');
+				opt.className = 'qc-opt';
+				opt.innerHTML = `<span class="ti ${esc(icon)}"></span><span class="qc-opt-text">${esc(name)}</span>`;
+				this.addDestOpt(list, opt, () => this.pickNewNoteTitle(list, c, name, icon));
+			}
+			if (this.destOpts.length > 1) this.setDestSel(1);
+		};
+		this.newNoteFilter = paint;
+		paint();
+	}
+
+	async pickNewNoteTitle(list, c, name, icon) {
+		const input = this.popEl && this.popEl.querySelector('.qc-pop-input');
+		if (!input) return;
+		this.newNoteFilter = null;
+		const my = ++this.searchToken;
+		const first = await this.captureFirstTitle();
+		if (!this.popEl || !this.newNoteMode || my !== this.searchToken) return;
+		input.value = first.text;
+		input.placeholder = 'Title for the new page';
+		input.focus();
+		try { input.select(); } catch (e) {}
 		this.resetDestList(list);
-		this.newNoteMode = true;
-		this.sec(list, 'New note');
+		this.sec(list, 'New page in ' + name);
 		const back = document.createElement('div');
 		back.className = 'qc-opt';
-		back.innerHTML = `<span class="ti ti-arrow-left"></span><span class="qc-opt-text">Back to destinations</span>`;
-		this.addDestOpt(list, back, () => {
+		back.innerHTML = `<span class="ti ti-arrow-left"></span><span class="qc-opt-text">Back to collections</span>`;
+		this.addDestOpt(list, back, () => this.pickNewNote(list));
+		const create = document.createElement('div');
+		create.className = 'qc-opt';
+		create.innerHTML = `<span class="ti ti-file-plus"></span><span class="qc-opt-text">Create page in ${esc(name)}</span>`;
+		this.addDestOpt(list, create, () => {
+			const title = input.value.trim();
+			// left as prefilled, or empty: the capture's first line decides at Send
+			const fromFirst = !title || title === first.text;
 			this.newNoteMode = false;
-			this.searchToken++;
-			input.value = '';
-			input.placeholder = 'Search pages, lines, or a date for the Journal (e.g. "tomorrow")…';
-			this.renderDefaultDestOptions(list);
-			input.focus();
+			this.setDest({ kind: 'new', collection: c, name: title, collectionName: name, icon, fromFirst });
+			this.closeDestPicker();
 		});
-		this.sec(list, 'Choose a collection');
-		let firstIdx = null;
-		for (const c of collections) {
-			let name = 'Collection', icon = '';
-			try { name = c.getName() || name; } catch (e) {}
-			try { const conf = c.getConfiguration(); icon = (conf && typeof conf.icon === 'string' && conf.icon.startsWith('ti-')) ? conf.icon : ''; } catch (e) {}
-			icon = icon || 'ti-folder';
-			const opt = document.createElement('div');
-			opt.className = 'qc-opt';
-			opt.innerHTML = `<span class="ti ${esc(icon)}"></span><span class="qc-opt-text">${esc(name)}</span>`;
-			if (firstIdx === null) firstIdx = this.destOpts.length;
-			this.addDestOpt(list, opt, () => {
-				const title = input.value.trim();
-				if (!title) { this.toast('Enter a title for the new note.'); input.focus(); return; }
-				this.newNoteMode = false;
-				this.setDest({ kind: 'new', collection: c, name: title, collectionName: name, icon });
-				this.closeDestPicker();
-			});
+		this.setDestSel(1);
+	}
+
+	// The capture's first line as a page title: { text, guid }. text is '' when
+	// that line is not PLAIN text (refs, tags, dates or links can't be a title).
+	async captureFirstTitle() {
+		const none = { text: '', guid: null };
+		const rec = this.scratchGuid && this.data.getRecord(this.scratchGuid);
+		if (!rec) return none;
+		let items = [];
+		try { items = (await rec.getLineItems()) || []; } catch (e) { return none; }
+		const first = topLevelItems(items, this.scratchGuid).find((li) => !isEmptyLine(li));
+		if (!first) return none;
+		const ts = liRaw(first).ts;
+		if (!Array.isArray(ts) || !ts.length) return none;
+		let text = '';
+		for (let i = 0; i < ts.length; i += 2) {
+			if (ts[i] !== 'text' || typeof ts[i + 1] !== 'string') return { text: '', guid: liGuid(first) };
+			text += ts[i + 1];
 		}
-		if (firstIdx === null) {
-			const empty = document.createElement('div'); empty.className = 'qc-opt'; empty.textContent = 'No collections available';
-			list.appendChild(empty);
-		} else {
-			this.setDestSel(firstIdx);
-		}
+		return { text: text.trim().slice(0, 120), guid: liGuid(first) };
 	}
 
 	resetDestList(list) {
@@ -1382,7 +1435,7 @@ class Plugin extends AppPlugin {
 		this.addDestOpt(list, journal, () => { this.setDest({ kind: 'journal' }); this.closeDestPicker(); });
 		const newNote = document.createElement('div');
 		newNote.className = 'qc-opt';
-		newNote.innerHTML = `<span class="ti ti-file-plus"></span><span class="qc-opt-text">New note in a collection…</span>`;
+		newNote.innerHTML = `<span class="ti ti-file-plus"></span><span class="qc-opt-text">New note in a collection</span>`;
 		this.addDestOpt(list, newNote, () => this.pickNewNote(list));
 		this.sec(list, 'Type to search pages, lines, or a date');
 	}
@@ -1611,7 +1664,7 @@ class Plugin extends AppPlugin {
 		if (!lbl) return;
 		if (dest.kind === 'journal') { lbl.textContent = dest.dateLabel ? ('Journal · ' + dest.dateLabel) : "Today's Journal"; if (icon) icon.className = 'ti ti-calendar-event'; }
 		else if (dest.kind === 'new') {
-			lbl.textContent = dest.name;
+			lbl.textContent = dest.name || ('New page in ' + (dest.collectionName || 'collection'));
 			lbl.title = 'New note in ' + (dest.collectionName || 'collection');
 			if (icon) icon.className = 'ti ti-file-plus';
 		}
@@ -1696,18 +1749,26 @@ class Plugin extends AppPlugin {
 		// sibling to insert after; null = start). The indent toggle picks between
 		// nesting under the chosen heading/line vs placing directly after it.
 		let destRec = null, parentTarget = null, anchor = null, destLabel = '';
+		let titleGuid = null;   // a new page titled by the capture's first line
 		const indent = !!this.indentUnder;
 		try {
 			if (this.dest.kind === 'new') {
+				// title from the first line: decided now, the capture may have changed since the pick
+				let title = this.dest.name;
+				if (this.dest.fromFirst) {
+					const first = await this.captureFirstTitle();
+					if (first.text) { title = first.text; titleGuid = first.guid; }
+				}
+				if (!title) { this.toast('Type a title for the new page.'); return; }
 				// createRecord's result is only queryable a beat later — same polling
 				// pattern as the scratch page
 				let guid = null;
-				try { guid = await this.dest.collection.createRecord(this.dest.name); } catch (e) {}
+				try { guid = await this.dest.collection.createRecord(title); } catch (e) {}
 				if (!guid) { this.toast('Could not create the new note in that collection.'); return; }
 				destRec = this.data.getRecord(guid);
 				for (let i = 0; !destRec && i < 16; i++) { await wait(120); destRec = this.data.getRecord(guid); }
 				if (!destRec) { this.toast('The new note was created but could not be loaded.'); return; }
-				destLabel = this.dest.name + (this.dest.collectionName ? ' · ' + this.dest.collectionName : '');
+				destLabel = title + (this.dest.collectionName ? ' · ' + this.dest.collectionName : '');
 				parentTarget = destRec;
 				anchor = null;
 			} else if (this.dest.kind === 'journal') {
@@ -1774,6 +1835,15 @@ class Plugin extends AppPlugin {
 		// a heading's children render flush since Thymer 1.0.20: indent them the way Tab does
 		if (moved && isHeading(parentTarget)) {
 			await indentUnderHeading(liGuid(parentTarget), anchor ? liGuid(anchor) : null, roots.map(liGuid).filter((g) => movedGuids.has(g)));
+		}
+		// that first line is the title now, so it leaves the body, unless it
+		// carries children (they need their parent)
+		if (moved && titleGuid && movedGuids.has(titleGuid)) {
+			try {
+				const ditems = (await destRec.getLineItems()) || [];
+				const first = ditems.find((li) => liGuid(li) === titleGuid);
+				if (first && !ditems.some((li) => liRaw(li).pguid === titleGuid)) await first.delete();
+			} catch (e) {}
 		}
 
 		// Panel mode: the box stays alive (now empty) for the next capture — the
