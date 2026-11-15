@@ -49,6 +49,9 @@ body.qc-modal-open .cmdpal--inline { z-index: 100001 !important; }
 	position: absolute; top: 0; left: 0; right: 0; height: 34px;
 	display: flex; align-items: center; gap: 8px; padding: 0 6px 0 12px;
 	cursor: move; user-select: none; z-index: 7;
+	/* same reason as the footer: the drag strip sits over the scroller, and with no
+	 * background at all the draft scrolled straight through it */
+	background: var(--qc-surface, #1e1e22);
 	border-bottom: 1px solid rgba(127,127,127,.14); font-size: 12px;
 	color: var(--ed-button-color, var(--text-color, #ccc));
 }
@@ -69,7 +72,12 @@ body.qc-modal-open .cmdpal--inline { z-index: 100001 !important; }
 .qc-footer {
 	position: absolute; left: 0; right: 0; bottom: 0; height: 48px;
 	display: flex; align-items: center; gap: 8px; padding: 0 10px;
-	background: rgba(127,127,127,.07);
+	/* The bar is drawn OVER the scroller, which spans the full box height, so with a
+	 * 93%-transparent background the draft scrolls visibly through it (only obvious
+	 * once a capture is long enough to scroll — measured live 2026-07-19). Keep the
+	 * 7% tint, but lay it over the box's own surface colour so the bar is opaque.
+	 * --qc-surface is set inline on the wrapper and inherits down to here. */
+	background: linear-gradient(rgba(127,127,127,.07), rgba(127,127,127,.07)), var(--qc-surface, #1e1e22);
 	border-top: 1px solid rgba(127,127,127,.18);
 	z-index: 6; font-size: 13px;
 	container: qc-footer / inline-size;
@@ -168,8 +176,12 @@ html.is-light .qc-indent.qc-on {
 html.is-light .qc-lp-text b { color: var(--color-primary-700, #2f8873); }
 .qc-lp-ctx { margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(127,127,127,.2); opacity: .6; font-size: 11.5px; }
 .qc-sec { padding: 6px 12px 2px; font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; opacity: .45; }
-.qc-indent-1 { padding-left: 26px; }
-.qc-indent-2 { padding-left: 40px; }
+.qc-hlvl {
+	flex: 0 0 auto; min-width: 16px;
+	font-size: 10px; font-weight: var(--font-weight-bold, 700);
+	opacity: .5; letter-spacing: .03em;
+}
+.qc-opt.qc-active .qc-hlvl { opacity: .8; }
 
 .qc-settings-backdrop {
 	position: fixed; inset: 0; z-index: 100000;
@@ -207,6 +219,38 @@ html.is-light .qc-lp-text b { color: var(--color-primary-700, #2f8873); }
 .qc-os { display: flex; flex-direction: column; gap: 3px; }
 .qc-os-name { font-weight: 700; font-size: 13px; }
 .qc-os-text { font-size: 12px; opacity: .66; line-height: 1.5; }
+
+/* ---- panel mode: the whole window IS the capture box. Used when the web
+ * client is loaded inside the floating-panel helper (or any tab) with #qc-panel
+ * in the URL. The box fills the viewport; the app behind it is curtained off. */
+body.qc-panel-mode::before {
+	content: ''; position: fixed; inset: 0; z-index: 99998;
+	background: var(--app-bg, #1e1e22);
+}
+body.qc-panel-mode .panel[data-qc-modal] {
+	top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important;
+	width: 100vw !important; height: 100vh !important;
+	min-height: 100vh !important; max-height: none !important;
+	margin: 0 !important; border: none !important; border-radius: 0 !important;
+	box-shadow: none !important;
+}
+/* no drag/resize/cancel — the OS panel is the window; × hides it via the helper */
+body.qc-panel-mode .qc-header { cursor: default; }
+body.qc-panel-mode .qc-resize { display: none !important; }
+body.qc-panel-mode .qc-cancel { display: none !important; }
+/* Thymer's toasts sit at z-index 9999 — beneath the curtain (99998) and the
+ * fullscreen box (99999). Lift them above both so "Sent …" is visible. */
+body.qc-panel-mode .id--toaster-area { z-index: 100003 !important; }
+/* Thymer's own popups set background from var(--cmdpal-bg-color) with NO literal
+ * fallback (verified in the served CSS), so the moment that var is empty the
+ * @/#/date menu paints fully TRANSPARENT and the page bleeds through it. Seen in
+ * the panel (the box auto-opens DURING load, and a CUSTOM theme also waits on the
+ * user's custom CSS) AND in the desktop app. Scoped to "our box is open", which is
+ * the same scope as the z-index lift above. When the theme is present this changes
+ * nothing — the var wins. --qc-surface is published on documentElement (these
+ * popups are portaled to <body>, outside our wrapper, so they cannot inherit it). */
+/* the panel window is narrow — let the line hover preview use most of it */
+body.qc-panel-mode .qc-linepreview { max-width: min(640px, calc(100vw - 24px)); }
 `;
 
 // In-Thymer hotkey to open the capture box (active whenever Thymer is focused).
@@ -217,6 +261,26 @@ function defaultHotkey() {
 	const mac = (typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || ''))
 		|| !!document.querySelector('.is-desktop-mac');
 	return { key: 'y', meta: mac, ctrl: !mac, shift: true, alt: false };
+}
+
+// Panel mode: the tab/webview was opened with #qc-panel (or ?qc-panel) in the
+// URL — the whole window becomes ONLY the capture box (used by the floating
+// -panel helper, which loads the WEB client inside a native panel). The SPA may
+// rewrite the URL before plugins load, so also check the URL the document was
+// ORIGINALLY loaded with (the navigation timing entry), and remember the mode
+// in sessionStorage so in-tab reloads keep it.
+function qcPanelMode() {
+	try {
+		if (sessionStorage.getItem('qc_panel_mode') === '1') return true;
+		const urls = [location.href || ''];
+		const nav = performance.getEntriesByType && performance.getEntriesByType('navigation')[0];
+		if (nav && nav.name) urls.push(nav.name);
+		if (urls.some((u) => /[?#&]qc-panel\b/.test(u))) {
+			sessionStorage.setItem('qc_panel_mode', '1');
+			return true;
+		}
+	} catch (e) {}
+	return false;
 }
 
 class Plugin extends AppPlugin {
@@ -252,11 +316,74 @@ class Plugin extends AppPlugin {
 	seenActionNonces = [];        // dedupe for the helper's action-URL retries
 	collMap = {};                 // collection guid -> name (built on picker open)
 	recordsCache = [];            // all workspace records, snapshotted on picker open
+	newNoteMode = false;          // picker is asking for a new note's title + collection
 	linePreviewEl = null;         // floating full-text preview shown on line hover
+	panelMode = false;            // whole window = the capture box (#qc-panel in the URL)
+	panelWatchdog = null;         // panel mode: heals the box when Thymer re-renders panels
+	panelDeleteHandler = null;    // panel mode: WebKit Backspace/Delete fix (see onLoad)
+	themeObserver = null;         // panel mode: re-tints the box when the theme lands
 
 	onLoad() {
 		this.loadSettings();
 		this.ui.injectCSS(CSS);
+		this.panelMode = qcPanelMode();
+		if (this.panelMode) {
+			document.body.classList.add('qc-panel-mode');
+			this.autoOpenPanel();
+			this.startPanelWatchdog();
+			// the web client's panel LAYOUT is per-client but shared across tabs of
+			// the same browser profile — close our box panel when the tab goes away
+			// so a normal web session isn't left with a stray scratch panel
+			window.addEventListener('pagehide', () => {
+				try { if (this.panel) this.ui.closePanel(this.panel); } catch (e) {}
+			});
+			// moving the OS panel steals focus from the page for a moment (blur),
+			// which drops the editor caret — typing dies. Re-place the caret
+			// whenever focus comes back (and on any click into the box).
+			window.addEventListener('focus', () => {
+				if (this.panel) setTimeout(() => this.placeCaret(), 80);
+			});
+			// WebKit fix (the WKWebView panel): Thymer's editor drives deletes off
+			// the NATIVE beforeinput stream from its hidden textarea (#virtualinput),
+			// but the textarea is drained into the model per keystroke, and WebKit —
+			// unlike Chromium — fires NO beforeinput for Backspace in an empty
+			// textarea. Net effect: one delete right after typing, then dead keys.
+			// Thymer's own (unused-on-desktop) fallback `Fp` shows the sanctioned
+			// recipe: feed a synthetic beforeinput straight into the virtual input's
+			// handler ($o) and swallow the keydown. Do exactly that, for exactly the
+			// combos Fp maps. Verified live in the panel 2026-07-12.
+			this.panelDeleteHandler = (e) => {
+				if (e.key !== 'Backspace' && e.key !== 'Delete') return;
+				if (e.metaKey || e.ctrlKey || e.defaultPrevented) return;
+				const vi = window.g_virtual_input;
+				if (!vi || !vi.$textarea) return;
+				const t = e.target;
+				// real inputs (destination picker, dialogs) keep native behaviour
+				if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') && t !== vi.$textarea) return;
+				const type = e.key === 'Backspace'
+					? (e.altKey ? 'deleteWordBackward' : 'deleteContentBackward')
+					: (e.altKey ? 'deleteWordForward' : 'deleteContentForward');
+				// Feed Thymer's own beforeinput listener. Prefer the public route (dispatch
+				// on the hidden textarea); fall back to the internal handler if this build
+				// still exposes it. Depending on the minified name alone broke the moment
+				// Thymer shipped a new bundle.
+				const ie = new InputEvent('beforeinput', { inputType: type, bubbles: true, cancelable: true });
+				if (typeof vi.$o === 'function') vi.$o(ie); else vi.$textarea.dispatchEvent(ie);
+				e.preventDefault();
+			};
+			window.addEventListener('keydown', this.panelDeleteHandler, true);
+			// The box is never torn down in panel mode, so hiding and reopening the
+			// window kept the previously picked destination — easy to send to the wrong
+			// page without noticing. Reset to the default every time the panel comes
+			// back into view (the window being hidden flips visibilityState).
+			document.addEventListener('visibilitychange', () => {
+				if (document.visibilityState === 'visible' && this.panel) this.setDest({ kind: 'journal' });
+			});
+		}
+		// One-shot sweep (both modes): interrupted panel-mode cycles can leak
+		// scratch-page panels into the layout. Close any that aren't the live box.
+		setTimeout(() => this.sweepScratchPanels(), 3000);
+		setTimeout(() => this.sweepScratchPanels(), 12000);
 		this.cmd = this.ui.addCommandPaletteCommand({
 			label: 'Quick Capture',
 			icon: 'ti-bolt',
@@ -280,8 +407,16 @@ class Plugin extends AppPlugin {
 			// Move To yields to us via a guard that checks for the open modal.
 			if (this.panel && this.matchesDestKey(e)) {
 				e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-				const input = this.popEl && this.popEl.querySelector('.qc-pop-input');
-				if (input) input.focus(); else this.toggleDestPicker();
+				// Same chord toggles: open it, or close it again if you change your mind.
+				// Closing never alters the destination (only picking a row does), so a
+				// second press is always a safe cancel. Hand focus back to the editor so
+				// typing continues at the caret instead of going nowhere.
+				if (this.popEl) {
+					this.closeDestPicker();
+					try { window.g_virtual_input.$textarea.focus(); } catch (e) {}
+				} else {
+					this.toggleDestPicker();
+				}
 				return;
 			}
 			if (!this.matchesHotkey(e)) return;
@@ -352,6 +487,9 @@ class Plugin extends AppPlugin {
 	}
 
 	onUnload() {
+		if (this.panelWatchdog) { clearInterval(this.panelWatchdog); this.panelWatchdog = null; }
+		if (this.panelDeleteHandler) { window.removeEventListener('keydown', this.panelDeleteHandler, true); this.panelDeleteHandler = null; }
+		if (this.themeObserver) { this.themeObserver.disconnect(); this.themeObserver = null; }
 		this.teardown();
 		this.closeSettings();
 		if (this.hotkeyHandler) { window.removeEventListener('keydown', this.hotkeyHandler, true); this.hotkeyHandler = null; }
@@ -470,6 +608,19 @@ class Plugin extends AppPlugin {
 		}
 		const col = await this.homeCollection();
 		if (!col) return null;
+		// Fresh localStorage (the web client in panel mode, or a reinstall): adopt
+		// the existing scratch page by name instead of creating a duplicate — the
+		// desktop app and the panel then share ONE scratch page (and draft) via sync.
+		try {
+			const colGuid = col.getGuid ? col.getGuid() : null;
+			const existing = (this.data.getAllRecords() || []).find((r) =>
+				this.collGuidOf(r) === colGuid && ((r.getName && r.getName()) || '') === '⚡ Quick Capture');
+			if (existing) {
+				this.scratchGuid = rowGuid(existing);
+				this.persistSettings();
+				return existing;
+			}
+		} catch (e) {}
 		const guid = await col.createRecord('⚡ Quick Capture');
 		if (!guid) return null;
 		let rec = null;
@@ -556,10 +707,14 @@ class Plugin extends AppPlugin {
 
 	themeSurfaceColor() {
 		const probe = document.querySelector('.panels-grid-sidebar');
-		let c = probe ? getComputedStyle(probe).backgroundColor : '';
-		if (!c || c === 'rgba(0, 0, 0, 0)' || c === 'transparent') {
-			c = this.isDarkTheme() ? '#1e1e22' : '#ffffff';
-		}
+		const c = probe ? getComputedStyle(probe).backgroundColor : '';
+		// The box gets this as its opaque surface, so a see-through value must NEVER
+		// pass. The old guard string-matched 'rgba(0, 0, 0, 0)', but this build
+		// serialises colours as color(display-p3 …) — and a transparent one comes back
+		// as 'color(display-p3 0 0 0 / 0)', which slipped straight through and was
+		// painted onto the box, making it (and the translucent footer over it)
+		// see-through. VERIFIED live 2026-07-19.
+		if (qcIsTransparent(c)) return this.isDarkTheme() ? '#1e1e22' : '#ffffff';
 		return c;
 	}
 
@@ -578,18 +733,74 @@ class Plugin extends AppPlugin {
 
 	// ---- open / teardown ---------------------------------------------------
 
-	async open() {
+	// Panel mode: open the box as soon as the workspace can host it. On a cold
+	// web-client load, data (and the scratch page) may not be synced yet — keep
+	// retrying quietly instead of toasting failures at the user.
+	async autoOpenPanel() {
+		for (let i = 0; i < 60 && !this.panel; i++) {
+			if (!this.opening) { try { await this.open(true); } catch (e) {} }
+			if (!this.panel) await wait(1000);
+		}
+	}
+
+	// Close leaked scratch-page panels (from interrupted panel-mode cycles) —
+	// every panel navigated to the scratch record EXCEPT the live box (identified
+	// by its data-qc-modal wrapper, since panel object identity isn't reliable).
+	sweepScratchPanels() {
+		try {
+			const panels = (this.ui.getPanels && this.ui.getPanels()) || [];
+			for (const p of panels) {
+				try {
+					const el = p.getElement && p.getElement();
+					if (el && el.closest && el.closest('.panel[data-qc-modal]')) continue;   // the live box
+					const rootId = p.getNavigation && p.getNavigation()?.rootId;
+					if (!rootId) continue;
+					let isScratch = !!this.scratchGuid && rootId === this.scratchGuid;
+					if (!isScratch) {
+						const r = this.data.getRecord(rootId);
+						isScratch = !!r && ((r.getName && r.getName()) || '') === '⚡ Quick Capture';
+					}
+					if (isScratch) this.ui.closePanel(p);
+				} catch (e) {}
+			}
+		} catch (e) {}
+	}
+
+	// Panel mode only: when sync catches up after a (re)load, Thymer re-renders
+	// the panels grid and REPLACES the element we tagged as the box — the modal
+	// chrome vanishes while this.panel still looks alive. Detect that, tear down
+	// cleanly (also closes the now-orphaned panel) and reopen fresh. Runs only in
+	// the dedicated panel window, so the "no idle work" doctrine for the main app
+	// still holds.
+	startPanelWatchdog() {
+		if (this.panelWatchdog) return;
+		this.panelWatchdog = setInterval(() => {
+			if (!this.panelMode || this.opening) return;
+			if (this.panel && !document.querySelector('.panel[data-qc-modal]')) {
+				try { this.teardown(); } catch (e) {}
+				this.autoOpenPanel();
+			}
+		}, 1500);
+	}
+
+	async open(quiet) {
 		if (this.panel || this.opening) return;
 		this.opening = true;
 		try {
 			// NOTE: do NOT clear here — the scratch page persists its draft across
 			// opens. It's only emptied by Send (which moves the content out).
 			const rec = await this.getScratchRecord();
-			if (!rec) { this.toast('Could not open the capture box.'); return; }
+			if (!rec) { if (!quiet) this.toast('Could not open the capture box.'); return; }
 
-			const wsGuid = this.ui.getActivePanel()?.getNavigation()?.workspaceGuid || null;
+			// The plugin instance carries its own workspaceGuid — always right, and
+			// available even when no panel is active yet (e.g. right after a web
+			// -client reload in panel mode, where the active panel's navigation
+			// isn't ready and navigateTo would throw "no workspace guid specified").
+			const wsGuid = this.workspaceGuid
+				|| this.ui.getActivePanel()?.getNavigation()?.workspaceGuid || null;
+			if (!wsGuid) { if (!quiet) this.toast('Could not open the capture box.'); return; }   // not ready — auto-open retries
 			const panel = await this.ui.createPanel();
-			if (!panel) { this.toast('Could not open the capture box.'); return; }
+			if (!panel) { if (!quiet) this.toast('Could not open the capture box.'); return; }
 			this.panel = panel;
 
 			// Style as a modal IMMEDIATELY — before navigating in content and
@@ -599,10 +810,17 @@ class Plugin extends AppPlugin {
 			for (let i = 0; i < 20 && !wrapper; i++) { await wait(16); wrapper = this.panelWrapper(); }
 			if (wrapper) this.mountChrome(wrapper);
 
-			panel.navigateTo({
-				type: 'edit_panel', rootId: this.scratchGuid, subId: null, workspaceGuid: wsGuid,
-				state: { positions: [this.scratchGuid, 'empty-' + this.scratchGuid, 0, 'L'] },
-			});
+			try {
+				panel.navigateTo({
+					type: 'edit_panel', rootId: this.scratchGuid, subId: null, workspaceGuid: wsGuid,
+					state: { positions: [this.scratchGuid, 'empty-' + this.scratchGuid, 0, 'L'] },
+				});
+			} catch (e) {
+				// leave nothing half-mounted: clear the panel so a retry starts clean
+				this.teardown();
+				if (!quiet) this.toast('Could not open the capture box.');
+				return;
+			}
 			try { this.ui.setActivePanel(panel); } catch (e) {}
 			this.dest = { kind: 'journal' };
 
@@ -613,21 +831,59 @@ class Plugin extends AppPlugin {
 		}
 	}
 
+	// Paint the box from the LIVE theme. Split out of mountChrome because the box
+	// may mount before the theme has landed (panel mode auto-opens during page
+	// load, and a CUSTOM theme also waits on the user's custom CSS) — in that
+	// case the first paint is the light-mode fallback and has to be redone.
+	applyThemeColors(wrapper) {
+		if (!wrapper) return;
+		const surface = this.themeSurfaceColor(), border = this.themeBorderColor(), shadow = this.themeShadow();
+		wrapper.style.backgroundColor = surface;
+		wrapper.style.setProperty('--qc-surface', surface);
+		wrapper.style.setProperty('--qc-border', border);
+		wrapper.style.setProperty('--qc-shadow', shadow);
+	}
+
+	// Panel mode's replacement for watchGrid's re-tinting half. watchGrid is off
+	// there (it observed the GRID's style AND wrote grid styles — that ping-pong
+	// under the WKWebView's pageZoom was the 100%-CPU storm). This one observes
+	// ONLY documentElement's class and writes ONLY the box's own colours, so it
+	// cannot feed itself. Plus a few delayed re-tints, because a theme can land
+	// without a class mutation (custom CSS arriving late).
+	watchPanelTheme(wrapper) {
+		[400, 1200, 3000, 8000].forEach((ms) => setTimeout(() => {
+			const w = this.panelWrapper();
+			if (w) this.applyThemeColors(w);
+		}, ms));
+		if (this.themeObserver) return;
+		this.themeObserver = new MutationObserver(() => {
+			const w = this.panelWrapper();
+			if (w) this.applyThemeColors(w);
+		});
+		this.themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] });
+	}
+
 	mountChrome(wrapper) {
 		if (!wrapper) return;
 		wrapper.setAttribute('data-qc-modal', '1');
-		wrapper.style.backgroundColor = this.themeSurfaceColor();
-		wrapper.style.setProperty('--qc-surface', this.themeSurfaceColor());
-		wrapper.style.setProperty('--qc-border', this.themeBorderColor());
-		wrapper.style.setProperty('--qc-shadow', this.themeShadow());
+		this.applyThemeColors(wrapper);
 		document.body.classList.add('qc-modal-open');
 		// createPanel adds a real column to the panels grid; the modal floats
 		// (fixed), so collapse that column to 0 — otherwise its slot shows as an
-		// empty panel behind the floating window.
-		this.collapseModalTrack(wrapper);
-		this.watchGrid(wrapper);
+		// empty panel behind the floating window. NOT in panel mode: the box is
+		// fullscreen over an opaque curtain, so the grid behind is invisible —
+		// and the grid MutationObserver must not exist there (its computed-style
+		// read + style writes ping-ponged with Thymer's relayout under the
+		// WKWebView's pageZoom into a 100%-CPU microtask storm, 2026-07-12).
+		if (!this.panelMode) {
+			this.collapseModalTrack(wrapper);
+			this.watchGrid(wrapper);
+		} else {
+			this.watchPanelTheme(wrapper);
+		}
 		// restore a saved position/size — it floats like a movable notepad
-		if (this.geometry) this.applyGeometry(wrapper, this.geometry);
+		// (not in panel mode: there the box always fills the whole window)
+		if (this.geometry && !this.panelMode) this.applyGeometry(wrapper, this.geometry);
 
 		// drag header (move the window) + close
 		const header = document.createElement('div');
@@ -640,7 +896,7 @@ class Plugin extends AppPlugin {
 		wrapper.appendChild(header);
 		this.headerEl = header;
 		header.querySelector('.qc-x').addEventListener('click', (e) => { e.stopPropagation(); this.cancel(); });
-		this.attachDrag(wrapper, header);
+		if (!this.panelMode) this.attachDrag(wrapper, header);
 
 		// footer with destination + actions
 		const footer = document.createElement('div');
@@ -668,13 +924,15 @@ class Plugin extends AppPlugin {
 		footer.querySelector('.qc-cancel').addEventListener('click', () => this.cancel());
 		footer.querySelector('.qc-send').addEventListener('click', () => this.send());
 
-		// resize handle (bottom-right corner)
-		const grip = document.createElement('div');
-		grip.className = 'qc-resize';
-		grip.innerHTML = '<span class="ti ti-arrow-down-right"></span>';
-		wrapper.appendChild(grip);
-		this.resizeEl = grip;
-		this.attachResize(wrapper, grip);
+		// resize handle (bottom-right corner) — meaningless in panel mode
+		if (!this.panelMode) {
+			const grip = document.createElement('div');
+			grip.className = 'qc-resize';
+			grip.innerHTML = '<span class="ti ti-arrow-down-right"></span>';
+			wrapper.appendChild(grip);
+			this.resizeEl = grip;
+			this.attachResize(wrapper, grip);
+		}
 
 		// Cmd/Ctrl+Shift+Enter sends. Shift is REQUIRED: plain Cmd/Ctrl+Enter must
 		// fall through to Thymer's checkbox toggle so todos can be created inside
@@ -694,14 +952,17 @@ class Plugin extends AppPlugin {
 		// click outside the box closes it — but not clicks on the editor's @/#/date
 		// menu or the destination picker (both portaled outside the modal wrapper).
 		// Use pointerdown: Thymer swallows mousedown before it reaches JS, but
-		// pointerdown propagates.
-		this.outsideHandler = (e) => {
-			const w = this.panelWrapper();
-			if (!w || w.contains(e.target)) return;
-			if (e.target.closest && (e.target.closest('.cmdpal--inline') || e.target.closest('.qc-pop'))) return;
-			this.cancel();
-		};
-		document.addEventListener('pointerdown', this.outsideHandler, true);
+		// pointerdown propagates. (Not in panel mode: the box IS the window,
+		// there is no meaningful "outside".)
+		if (!this.panelMode) {
+			this.outsideHandler = (e) => {
+				const w = this.panelWrapper();
+				if (!w || w.contains(e.target)) return;
+				if (e.target.closest && (e.target.closest('.cmdpal--inline') || e.target.closest('.qc-pop'))) return;
+				this.cancel();
+			};
+			document.addEventListener('pointerdown', this.outsideHandler, true);
+		}
 	}
 
 	// Once the modal is position:fixed it leaves the grid flow; the remaining
@@ -857,7 +1118,18 @@ class Plugin extends AppPlugin {
 		this.persistSettings();
 	}
 
-	cancel() { this.teardown(); }
+	cancel() {
+		// Panel mode: the box IS the window, so "close" means hiding the OS panel
+		// (the helper's job) — never tear down the editor. The draft stays, as always.
+		if (this.panelMode) { this.panelNotify('hide'); return; }
+		this.teardown();
+	}
+
+	// Tell the native helper (the WKWebView host) about panel-worthy events
+	// ('hide', 'sent'). Silently a no-op in a plain browser tab / the desktop app.
+	panelNotify(event) {
+		try { window.webkit?.messageHandlers?.qcPanel?.postMessage?.(event); } catch (e) {}
+	}
 
 	updateIndentBtn() {
 		const btn = this.footerEl && this.footerEl.querySelector('.qc-indent');
@@ -889,6 +1161,7 @@ class Plugin extends AppPlugin {
 		this.loadCollMap();
 		this.renderDefaultDestOptions(list);
 		input.addEventListener('input', () => {
+			if (this.newNoteMode) return;   // the input is the note's title here, not a query
 			clearTimeout(this.searchTimer);
 			const q = input.value.trim();
 			this.searchTimer = setTimeout(() => this.runDestSearch(q, list), 180);
@@ -908,6 +1181,7 @@ class Plugin extends AppPlugin {
 	}
 
 	closeDestPicker() {
+		this.newNoteMode = false;
 		clearTimeout(this.searchTimer);
 		this.searchToken++;   // invalidate in-flight searches
 		this.destOpts = []; this.destSel = 0;
@@ -934,7 +1208,10 @@ class Plugin extends AppPlugin {
 		const vw = window.innerWidth, vh = window.innerHeight;
 		const belowSpace = vh - r.bottom - 12, aboveSpace = r.top - 12;
 		const placeBelow = belowSpace >= aboveSpace;
-		box.style.maxHeight = Math.max(80, Math.min(placeBelow ? belowSpace : aboveSpace, Math.round(vh * 0.6))) + 'px';
+		// 60vh suits the big app window; the panel window is small, so there the
+		// preview may use nearly the full height (it long-truncated otherwise)
+		const capRatio = this.panelMode ? 0.92 : 0.6;
+		box.style.maxHeight = Math.max(80, Math.min(placeBelow ? belowSpace : aboveSpace, Math.round(vh * capRatio))) + 'px';
 		const bw = box.offsetWidth, bh = box.offsetHeight;
 		const left = Math.max(8, Math.min(r.left, vw - bw - 8));
 		let top = placeBelow ? r.bottom + 4 : r.top - bh - 4;
@@ -953,8 +1230,16 @@ class Plugin extends AppPlugin {
 			const m = {};
 			for (const c of (cols || [])) {
 				let g = null; try { g = c._getRow ? c._getRow().guid : (c.guid || null); } catch (e) {}
+				// _getRow() does not reliably carry a guid for COLLECTIONS; without this
+				// fallback collMap can end up empty, which also costs the collection
+				// name on every result row (Move To needed the same fallback)
+				if (!g && c.getGuid) { try { g = c.getGuid(); } catch (e) {} }
 				let n = ''; try { n = c.getName ? c.getName() : ''; } catch (e) {}
-				let ic = ''; try { ic = (c.getIcon && c.getIcon()) || ''; } catch (e) {}
+				// PluginCollectionAPI has NO getIcon() — it returns undefined, so icons were
+				// always empty. The icon lives in getConfiguration().icon, and only ti-*
+				// values are font glyphs (Thymer also stores CSS 'fill' icons like
+				// blinking-dot, which would render blank as a class).
+				let ic = ''; try { ic = collIconFromConf(c.getConfiguration()); } catch (e) {}
 				if (g) m[g] = { name: n, icon: ic };
 			}
 			this.collMap = m;
@@ -998,6 +1283,85 @@ class Plugin extends AppPlugin {
 		try { cur.el.scrollIntoView({ block: 'nearest' }); } catch (e) {}
 	}
 
+	// New-note flow: type a title, pick a collection, and the capture becomes the
+	// body of a freshly created note there. Ported from the Move To plugin, where
+	// it came in as community PR #1 by phildrysdale1 — credit to him for the idea
+	// and the original implementation. Adapted to Quick Capture's two-step flow:
+	// choosing a collection sets the destination, and Send creates the note.
+	async pickNewNote(list) {
+		const input = this.popEl && this.popEl.querySelector('.qc-pop-input');
+		if (!input) return;
+		clearTimeout(this.searchTimer);
+		const my = ++this.searchToken;
+		this.newNoteMode = true;
+		input.value = '';
+		input.placeholder = 'Enter a title for the new note…';
+		this.resetDestList(list);
+		this.newNoteMode = true;   // resetDestList doesn't touch it, but keep intent explicit
+		this.sec(list, 'Loading collections…');
+		input.focus();
+
+		let collections = [];
+		try { collections = await this.data.getAllCollections(); } catch (e) {}
+		if (!this.popEl || !this.newNoteMode || my !== this.searchToken) return;
+		collections = (collections || []).filter((c) => {
+			try {
+				if (!c || typeof c.createRecord !== 'function') return false;
+				// journals own their pages by date, so a new note can't live there
+				if (c.isJournalPlugin && c.isJournalPlugin()) return false;
+				// our own hidden scratch collection is not a real destination
+				if (this.homeCollectionGuid && c.getGuid && c.getGuid() === this.homeCollectionGuid) return false;
+				return true;
+			} catch (e) { return false; }
+		});
+		collections.sort((a, b) => {
+			let an = '', bn = '';
+			try { an = a.getName() || ''; } catch (e) {}
+			try { bn = b.getName() || ''; } catch (e) {}
+			return an.localeCompare(bn);
+		});
+
+		this.resetDestList(list);
+		this.newNoteMode = true;
+		this.sec(list, 'New note');
+		const back = document.createElement('div');
+		back.className = 'qc-opt';
+		back.innerHTML = `<span class="ti ti-arrow-left"></span><span class="qc-opt-text">Back to destinations</span>`;
+		this.addDestOpt(list, back, () => {
+			this.newNoteMode = false;
+			this.searchToken++;
+			input.value = '';
+			input.placeholder = 'Search pages, lines, or a date for the Journal (e.g. "tomorrow")…';
+			this.renderDefaultDestOptions(list);
+			input.focus();
+		});
+		this.sec(list, 'Choose a collection');
+		let firstIdx = null;
+		for (const c of collections) {
+			let name = 'Collection', icon = '';
+			try { name = c.getName() || name; } catch (e) {}
+			try { const conf = c.getConfiguration(); icon = (conf && typeof conf.icon === 'string' && conf.icon.startsWith('ti-')) ? conf.icon : ''; } catch (e) {}
+			icon = icon || 'ti-folder';
+			const opt = document.createElement('div');
+			opt.className = 'qc-opt';
+			opt.innerHTML = `<span class="ti ${esc(icon)}"></span><span class="qc-opt-text">${esc(name)}</span>`;
+			if (firstIdx === null) firstIdx = this.destOpts.length;
+			this.addDestOpt(list, opt, () => {
+				const title = input.value.trim();
+				if (!title) { this.toast('Enter a title for the new note.'); input.focus(); return; }
+				this.newNoteMode = false;
+				this.setDest({ kind: 'new', collection: c, name: title, collectionName: name, icon });
+				this.closeDestPicker();
+			});
+		}
+		if (firstIdx === null) {
+			const empty = document.createElement('div'); empty.className = 'qc-opt'; empty.textContent = 'No collections available';
+			list.appendChild(empty);
+		} else {
+			this.setDestSel(firstIdx);
+		}
+	}
+
 	resetDestList(list) {
 		this.destOpts = []; this.destSel = 0;
 		this.hideLinePreview();
@@ -1016,6 +1380,10 @@ class Plugin extends AppPlugin {
 		journal.className = 'qc-opt';
 		journal.innerHTML = `<span class="ti ti-calendar-event"></span><span class="qc-opt-text">Today's Journal</span><span class="qc-opt-sub">default</span>`;
 		this.addDestOpt(list, journal, () => { this.setDest({ kind: 'journal' }); this.closeDestPicker(); });
+		const newNote = document.createElement('div');
+		newNote.className = 'qc-opt';
+		newNote.innerHTML = `<span class="ti ti-file-plus"></span><span class="qc-opt-text">New note in a collection…</span>`;
+		this.addDestOpt(list, newNote, () => this.pickNewNote(list));
 		this.sec(list, 'Type to search pages, lines, or a date');
 	}
 
@@ -1158,7 +1526,7 @@ class Plugin extends AppPlugin {
 		}
 		if (pages.length) {
 			this.sec(list, 'Pages');
-			for (const p of pages.slice(0, 12)) {
+			for (const p of pages.slice(0, 40)) {
 				const coll = this.collName(p.collGuid);
 				const opt = document.createElement('div');
 				opt.className = 'qc-opt';
@@ -1169,7 +1537,7 @@ class Plugin extends AppPlugin {
 		}
 		if (lines.length) {
 			this.sec(list, 'Lines');
-			for (const l of lines.slice(0, 10)) {
+			for (const l of lines.slice(0, 20)) {
 				const coll = this.collName(l.collGuid);
 				const opt = document.createElement('div');
 				opt.className = 'qc-opt';
@@ -1198,7 +1566,12 @@ class Plugin extends AppPlugin {
 		let headings = [], hasContent = false;
 		try {
 			const items = await rec.getLineItems();
-			headings = items.filter((li) => isHeading(li)).map((li) => ({ guid: liGuid(li), text: lineText(li), size: headingSize(li) }));
+			// getLineItems() is FLAT and NOT in document order (all top-level lines
+			// first, then children), so a nested heading used to be listed last.
+			// outlineHeadings walks the tree depth-first and reports how many HEADINGS
+			// each one sits under. QC captures text, it never moves existing lines, so
+			// there is nothing to exclude — hence the empty skip set.
+			headings = outlineHeadings(items, guid, new Set());
 			hasContent = topLevelItems(items, guid).some((li) => !isEmptyLine(li));
 		} catch (e) {}
 		// empty page: top and bottom are the same, so skip the chooser
@@ -1220,8 +1593,11 @@ class Plugin extends AppPlugin {
 		for (const h of headings) {
 			if (!h.guid) continue;
 			const opt = document.createElement('div');
-			opt.className = 'qc-opt qc-indent-' + Math.min(2, Math.max(0, (h.size || 1) - 1));
-			opt.innerHTML = `<span class="ti ti-heading"></span><span class="qc-opt-text">${esc(h.text || 'Heading')}</span>`;
+			// indent by OUTLINE depth, label with the REAL level: a text badge, because
+			// Thymer's font has ti-h-1 but not every ti-h-N (missing ones render blank)
+			opt.className = 'qc-opt';
+			opt.style.paddingLeft = (10 + Math.min(h.depth, 6) * 14) + 'px';
+			opt.innerHTML = `<span class="qc-hlvl">H${h.size}</span><span class="qc-opt-text">${esc(h.text || 'Heading')}</span>`;
 			this.addDestOpt(list, opt, () => { this.setDest({ kind: 'page', guid, name, afterHeadingGuid: h.guid, headingText: h.text, icon }); this.closeDestPicker(); });
 		}
 		// keep Bottom highlighted as the default (Enter picks it), even though Top is first
@@ -1234,6 +1610,11 @@ class Plugin extends AppPlugin {
 		const icon = this.footerEl && this.footerEl.querySelector('.qc-dest .ti');
 		if (!lbl) return;
 		if (dest.kind === 'journal') { lbl.textContent = dest.dateLabel ? ('Journal · ' + dest.dateLabel) : "Today's Journal"; if (icon) icon.className = 'ti ti-calendar-event'; }
+		else if (dest.kind === 'new') {
+			lbl.textContent = dest.name;
+			lbl.title = 'New note in ' + (dest.collectionName || 'collection');
+			if (icon) icon.className = 'ti ti-file-plus';
+		}
 		else if (dest.kind === 'line') {
 			lbl.textContent = dest.name;
 			lbl.title = dest.pageName ? `${dest.pageName} › ${dest.name}` : dest.name;
@@ -1285,15 +1666,19 @@ class Plugin extends AppPlugin {
 	}
 
 	async currentUserGuid() {
+		// Every strategy must yield a STRING: ref.guid is interpolated into the
+		// journal record id, so an object here mints a page called
+		// S-<coll>-[object Object]-0-<date> that breaks Markdown Mirror sync.
+		const str = (g) => (typeof g === 'string' && g.length ? g : null);
 		try {
-			if (typeof window !== 'undefined' && window.g_universe && window.g_universe.userId) return window.g_universe.userId;
+			if (typeof window !== 'undefined' && window.g_universe && str(window.g_universe.userId)) return window.g_universe.userId;
 		} catch (e) {}
 		try {
 			const us = await this.data.getActiveUsers();
 			if (us && us.length) {
 				const self = us.find((u) => u && (u.is_self || (u._getRow && u._getRow().is_self))) || us[0];
 				const g = self && (self.guid || (self._getRow && self._getRow().guid));
-				if (g) return g;
+				if (str(g)) return g;
 			}
 		} catch (e) {}
 		return null;
@@ -1313,7 +1698,19 @@ class Plugin extends AppPlugin {
 		let destRec = null, parentTarget = null, anchor = null, destLabel = '';
 		const indent = !!this.indentUnder;
 		try {
-			if (this.dest.kind === 'journal') {
+			if (this.dest.kind === 'new') {
+				// createRecord's result is only queryable a beat later — same polling
+				// pattern as the scratch page
+				let guid = null;
+				try { guid = await this.dest.collection.createRecord(this.dest.name); } catch (e) {}
+				if (!guid) { this.toast('Could not create the new note in that collection.'); return; }
+				destRec = this.data.getRecord(guid);
+				for (let i = 0; !destRec && i < 16; i++) { await wait(120); destRec = this.data.getRecord(guid); }
+				if (!destRec) { this.toast('The new note was created but could not be loaded.'); return; }
+				destLabel = this.dest.name + (this.dest.collectionName ? ' · ' + this.dest.collectionName : '');
+				parentTarget = destRec;
+				anchor = null;
+			} else if (this.dest.kind === 'journal') {
 				destRec = await this.resolveJournalRecord(this.dest.date);
 				if (!destRec) { this.toast('No Journal found in this workspace — pick a page instead.'); return; }
 				destLabel = this.dest.dateLabel ? ('the Journal, ' + this.dest.dateLabel) : "today's Journal";
@@ -1330,7 +1727,7 @@ class Plugin extends AppPlugin {
 					parentTarget = destRec; anchor = lastOf(topLevelItems(ditems, rowGuid(destRec)));
 					destLabel = this.dest.pageName || destLabel;
 				} else if (indent) {
-					parentTarget = target; anchor = lastChildOf(ditems, this.dest.guid);
+					parentTarget = target; anchor = nestAnchor(ditems, target, null);
 				} else {
 					parentTarget = siblingParent(ditems, target, destRec); anchor = target;
 				}
@@ -1345,7 +1742,7 @@ class Plugin extends AppPlugin {
 					if (!heading) {
 						parentTarget = destRec; anchor = lastOf(topLevelItems(ditems, rowGuid(destRec)));
 					} else if (indent) {
-						parentTarget = heading; anchor = lastChildOf(ditems, this.dest.afterHeadingGuid);
+						parentTarget = heading; anchor = nestAnchor(ditems, heading, null);
 					} else {
 						parentTarget = siblingParent(ditems, heading, destRec); anchor = heading;
 					}
@@ -1374,9 +1771,23 @@ class Plugin extends AppPlugin {
 		for (const li of order) {
 			try { await li.move(parentTarget, anchor); moved++; movedGuids.add(liGuid(li)); await wait(40); } catch (e) {}
 		}
+		// a heading's children render flush since Thymer 1.0.20: indent them the way Tab does
+		if (moved && isHeading(parentTarget)) {
+			await indentUnderHeading(liGuid(parentTarget), anchor ? liGuid(anchor) : null, roots.map(liGuid).filter((g) => movedGuids.has(g)));
+		}
 
-		this.teardown();
+		// Panel mode: the box stays alive (now empty) for the next capture — the
+		// OS panel hides via the helper. Otherwise: close the modal as before.
+		if (!this.panelMode) this.teardown();
 		if (!moved) { this.toast('Nothing was sent.'); return; }
+		if (this.panelMode) {
+			this.panelNotify('sent');
+			this.setDest({ kind: 'journal' });   // next capture starts at the default again
+			setTimeout(() => this.placeCaret(), 300);   // ready for the next capture
+			// no "Open" action in the panel: navigation belongs to the main app
+			this.toast(`Sent ${moved} line${moved > 1 ? 's' : ''} to ${destLabel}.`, { autoDestroyTime: 4000 });
+			return;
+		}
 		// "Open" jumps to the first line that actually moved (highlighted), so a
 		// partially failed send can't navigate to a line still in the scratch page.
 		const firstGuid = roots.map(liGuid).find((g) => movedGuids.has(g)) || null;
@@ -1411,25 +1822,128 @@ class Plugin extends AppPlugin {
 
 // ---- helpers --------------------------------------------------------------
 
+// ---- QC-only helpers (NOT owned by the shared picker file — keep them
+// OUTSIDE the markers below or the sync will delete them) -------------
+
+
+// True for any colour that would let the page show through, in ANY css colour
+// syntax: empty, the transparent keyword, rgba()/hsla() with a zero alpha, and the
+// modern color(...) / lab() / oklch() forms where alpha comes after a slash.
+// String-comparing 'rgba(0, 0, 0, 0)' is not enough — see themeSurfaceColor.
+function qcIsTransparent(c) {
+	const s = String(c == null ? '' : c).trim().toLowerCase();
+	if (!s || s === 'transparent' || s === 'none') return true;
+	const alphaText = (s.match(/\/\s*([0-9.]+%?)\s*\)$/) || [])[1]        // color(... / a)
+		|| (s.match(/^(?:rgba|hsla)\([^)]*?[,\s]\s*([0-9.]+%?)\s*\)$/) || [])[1];   // rgba(r,g,b,a)
+	if (alphaText == null) return false;
+	const a = alphaText.endsWith('%') ? parseFloat(alphaText) / 100 : parseFloat(alphaText);
+	return !(a > 0);
+}
+
+function qcIsMac() { try { return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || ''); } catch (e) { return true; } }
+
+async function lastTopLevel(rec) {
+	try { const items = await rec.getLineItems(); return lastOf(topLevelItems(items, rowGuid(rec))); } catch (e) { return null; }
+}
+
+// <<<SHARED destination-picker — GENERATED, DO NOT EDIT HERE.
+// Source: shared/destination-picker.js  |  regenerate: node tools/sync-picker.mjs
 function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 function rowGuid(o) { try { return o && o._getRow ? o._getRow().guid : null; } catch (e) { return null; } }
+// A collection's icon comes from its CONFIGURATION (`icon`); PluginCollectionAPI
+// has no getIcon(). Thymer also stores a few non-font "fill" icons (blinking-dot)
+// that it renders as CSS rather than a glyph — those would come out blank, so
+// only pass through real `ti-` classes and let the caller fall back.
+function collIconFromConf(conf) {
+	const ic = conf && conf.icon;
+	if (!ic || typeof ic !== 'string') return '';
+	return ic.startsWith('ti-') ? ic : '';
+}
 // Line items: the runtime accessors (getType/getParent/getHeadingSize) are
-// unreliable here, so read the raw row instead. A line is top-level when its
-// parent guid equals the record guid; type/heading live on the raw row.
+// unreliable — read the raw row. Top-level when pguid === record guid.
 function liRaw(li) { try { return (li && li._getItem) ? (li._getItem() || {}) : {}; } catch (e) { return {}; } }
 function liGuid(li) { return liRaw(li).guid || null; }
 function liType(li) { return liRaw(li).type || 'text'; }
 function isHeading(li) { return liType(li) === 'heading'; }
+function isEmptyLine(li) { return liType(li) === 'text' && lineText(li) === ''; }
 function headingSize(li) { const mp = liRaw(li).mp; return (mp && mp.hsize) || 1; }
 function lineText(li) {
 	const ts = liRaw(li).ts; if (!Array.isArray(ts)) return '';
 	let s = ''; for (let i = 0; i < ts.length; i += 2) s += String(ts[i + 1] || ''); return s.trim();
 }
-function isEmptyLine(li) { return liType(li) === 'text' && lineText(li) === ''; }
 function topLevelItems(items, recGuid) { return (items || []).filter((li) => liRaw(li).pguid === recGuid); }
+// Build the page's heading outline: real document order + nesting depth.
+// getLineItems() is a FLAT list that is NOT in document order (every top-level
+// line comes first, then the children), so listing headings straight from it
+// puts nested ones at the end. It IS sibling-ordered within a single parent,
+// so regrouping by parent guid and walking depth-first restores the true order.
+// `depth` counts ANCESTOR HEADINGS, not raw tree depth, so the result reads as
+// an outline: two same-size headings where one sits under the other still come
+// out on different levels.
+function outlineHeadings(items, recGuid, skip) {
+	const kids = new Map();
+	for (const li of (items || [])) {
+		const pg = liRaw(li).pguid;
+		if (!pg) continue;
+		if (!kids.has(pg)) kids.set(pg, []);
+		kids.get(pg).push(li);
+	}
+	const out = [];
+	const walk = (parentGuid, depth) => {
+		for (const li of (kids.get(parentGuid) || [])) {
+			const g = liGuid(li);
+			if (!g) continue;
+			const isH = isHeading(li) && !(skip && skip.has(g));
+			if (isH) out.push({ guid: g, text: lineText(li), size: headingSize(li), depth });
+			walk(g, isH ? depth + 1 : depth);
+		}
+	};
+	walk(recGuid, 0);
+	return out;
+}
+// Thymer 1.0.20 made headings own the lines that follow them and draws a
+// heading's children FLUSH with the heading, so nesting content under a heading
+// no longer shows as an indent. Thymer's own Tab indents such a line with
+// OVERINDENT (`oind`), but the public line.move() always writes oind 0. After the
+// move, re-issue each root's final position through the editor's mutation queue
+// with oind 1: exactly the mutation Tab produces. `guids` must be in final
+// document order, the first sitting right after `afterGuid` (null = first child).
+// The queue silently DROPS a mutation for a line the editor has not loaded (a
+// line moved off a page no panel shows, e.g. a Whiteboard card), so load each one
+// first with getOrLoadItem, the app's own loader.
+// The one helper here with a side effect, kept shared so the internal call lives
+// in one place. Best effort: without these internals the lines stay flush, which
+// is where move() already put them. Measured 2026-10-04, app 1.0.20.
+async function indentUnderHeading(headingGuid, afterGuid, guids) {
+	const ops = window.g_universe && window.g_universe.operations;
+	if (!headingGuid || !ops || typeof ops.enqueueMutation !== 'function') return false;
+	let after = afterGuid || null;
+	for (const g of (guids || [])) {
+		if (!g) continue;
+		try {
+			if (typeof ops.getOrLoadItem === 'function') await ops.getOrLoadItem(g);
+			ops.enqueueMutation({ action: 'move_tree', item_guid: g, value: [headingGuid, after, 1] });
+		} catch (e) { return false; }
+		after = g;
+	}
+	return true;
+}
+// The anchor for content nested under `target`. Under a plain line: after its
+// last child, as before. Under a HEADING: right below the heading, after any
+// lines already indented there. Thymer folds an indented line that follows a
+// FLUSH one into that line (measured 2026-10-04), so appending at the end of a
+// section would quietly make the content a child of whatever line ends it.
+// Directly under the heading the indent survives, exactly as Thymer's own Tab.
+function nestAnchor(items, target, skip) {
+	const tg = liGuid(target);
+	const kids = (items || []).filter((li) => liRaw(li).pguid === tg && !(skip && skip.has(liGuid(li))));
+	if (!isHeading(target)) return lastOf(kids);
+	let anchor = null;
+	for (const li of kids) { if ((liRaw(li).oind || 0) >= 1) anchor = li; else break; }
+	return anchor;
+}
 function lastOf(arr) { return arr && arr.length ? arr[arr.length - 1] : null; }
-function lastChildOf(items, parentGuid) { return lastOf((items || []).filter((li) => liRaw(li).pguid === parentGuid)); }
 // The move target for "place directly after `target` at the same level":
 // the record when the target is top-level, else the target's parent line.
 function siblingParent(items, target, rec) {
@@ -1437,12 +1951,20 @@ function siblingParent(items, target, rec) {
 	if (pg === rowGuid(rec)) return rec;
 	return (items || []).find((li) => liGuid(li) === pg) || rec;
 }
-async function lastTopLevel(rec) {
-	try { const items = await rec.getLineItems(); return lastOf(topLevelItems(items, rowGuid(rec))); } catch (e) { return null; }
-}
 function truncate(s, n) { s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
 function qcNorm(s) { return String(s == null ? '' : s).toLowerCase().replace(/\s+/g, ' ').trim(); }
-function qcIsMac() { try { return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || ''); } catch (e) { return true; } }
+// Rank a page-name match: exact > prefix > word-start > plain substring, summed
+// across the "+" parts, so the strongest titles float to the top of the Pages list.
+function qcNameScore(nn, parts) {
+	let s = 0;
+	for (const p of parts) {
+		if (nn === p) s += 100;
+		else if (nn.startsWith(p)) s += 45;
+		else if (nn.includes(' ' + p)) s += 25;
+		else s += 8;
+	}
+	return s;
+}
 // Minimal date fallback (used only if Thymer's DateTime parser is unreachable):
 // ISO YYYY-MM-DD, plus today / tomorrow / yesterday. Returns a JS Date or null.
 function fallbackJournalDate(s) {
@@ -1471,21 +1993,8 @@ function qcHighlightAll(text, parts) {
 	}
 	return html + esc(full.slice(last));
 }
-// Rank a page-name match: exact > prefix > word-start > plain substring, summed
-// across the "+" parts, so the strongest titles float to the top of the Pages list.
-function qcNameScore(nn, parts) {
-	let s = 0;
-	for (const p of parts) {
-		if (nn === p) s += 100;
-		else if (nn.startsWith(p)) s += 45;
-		else if (nn.includes(' ' + p)) s += 25;
-		else s += 8;
-	}
-	return s;
-}
-// A short one-line snippet centred on the first matched part, with every part
-// word highlighted (<b>, accent-coloured via CSS). Adapted from Reference
-// Extravaganza's [[ picker.
+// A short one-line snippet centred on the first matched part, with matched
+// words highlighted (<b>, accent-coloured via CSS).
 function qcSnippetHTML(text, parts) {
 	const full = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
 	const words = [...new Set((parts || []).concat((parts || []).flatMap((p) => p.split(/\s+/))))].filter((w) => w.length >= 2).sort((a, b) => b.length - a.length);
@@ -1509,11 +2018,11 @@ function qcSnippetHTML(text, parts) {
 	html += esc(win.slice(last));
 	return (start > 0 ? '…' : '') + html + (end < full.length ? '…' : '');
 }
-// Reconstruct {type, text} segments from the pair-encoded live model
-// (itemsByGuid[guid].text_segments = [typeStr, data, typeStr, data, ...]).
+// Reconstruct {type, text} segments from the pair-encoded live model.
 function segmentsFromState(state) {
 	const ts = (state && state.text_segments) || [];
 	const segs = [];
 	for (let i = 0; i + 1 < ts.length; i += 2) segs.push({ type: String(ts[i]), text: ts[i + 1] });
 	return segs;
 }
+// >>>SHARED
