@@ -1,7 +1,10 @@
 # Changelog
 
-## 0.9.2 (deployed to Parham's workspace, not released)
+## 0.9.2 - 2026-11-15
 
+- **New note in a collection** takes two clear steps: first pick the collection, then name the page. The title starts out as the first line of your capture; leave it as is and that line becomes the title.
+- Fixed: **Nest under target** on a heading indents the captured content again. Since Thymer 1.0.20 a heading's content sits flush with the heading, so captures landed directly under it with no indent.
+- Fixed: lines you just typed show up again as destinations in the picker. After a Thymer update the picker could no longer tell which page such a line is on and left it out.
 - The hidden Quick Capture collection stays out of the command palette: neither the scratch page nor the collection itself (Open Collection, New Page, "Create in Quick Capture") shows there any more.
 
 ## 0.9.1
